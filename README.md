@@ -53,9 +53,9 @@ claude mcp add --scope user rust-lldb -- "$PWD/index.js"
 claude mcp list | grep rust-lldb   # should show "✓ Connected"
 ```
 
-Start a fresh Claude Code session; `mcp__rust_lldb__lldb_start`,
-`mcp__rust_lldb__lldb_command`, `mcp__rust_lldb__lldb_restart`, and
-`mcp__rust_lldb__lldb_stop` appear in the toolbox. The tool surface is
+Start a fresh Claude Code session; `mcp__rust-lldb__lldb_start`,
+`mcp__rust-lldb__lldb_command`, `mcp__rust-lldb__lldb_restart`, and
+`mcp__rust-lldb__lldb_stop` appear in the toolbox. The tool surface is
 driven entirely by this project; no per-project configuration is needed.
 
 ### Smoke test
