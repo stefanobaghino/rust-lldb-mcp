@@ -61,6 +61,10 @@ class Session {
         this.dead = false;
         this.nextRequestId = 1;
         this.closing = false;
+        // Populated by startSession after a successful spawn. Captures the
+        // arguments the caller supplied so lldb_restart can reuse them without
+        // requiring the caller to re-state binary/core/socket_wait_ms.
+        this.startArgs = null;
     }
 
     nextId() {
@@ -391,7 +395,65 @@ async function startSession({ binary, core, preload, socket_wait_ms }) {
         );
     }
 
-    return { session_id: id };
+    session.startArgs = {
+        binary: binary || null,
+        core: core || null,
+        preload: Array.isArray(preload) ? [...preload] : [],
+        socket_wait_ms: socket_wait_ms ?? null,
+    };
+    const preloadCount = session.startArgs.preload.length;
+    const stopSummary = await probeStopSummary(session);
+
+    return {
+        session_id: id,
+        binary: session.startArgs.binary,
+        core: session.startArgs.core,
+        preload_count: preloadCount,
+        stop_summary: stopSummary,
+    };
+}
+
+// Best-effort one-line summary of the session's current inferior state,
+// included in lldb_start / lldb_restart returns so callers don't need a
+// separate `process status` round-trip to know whether their preload
+// actually stopped at a breakpoint. Never fails the enclosing call:
+// any parse or RPC failure becomes "unknown".
+async function probeStopSummary(session) {
+    let statusOut;
+    try {
+        statusOut = await runLldbCommand(session, 'process status');
+    } catch {
+        return 'unknown';
+    }
+    const firstLine = (statusOut || '')
+        .split('\n')
+        .map(l => l.trim())
+        .find(l => l.length > 0) || '';
+    if (!firstLine) return 'target loaded (no process)';
+    // "error: invalid process" (LLDB 21), "error: Command requires a current
+    // process." (Apple LLDB) — both mean "target is loaded but nothing has run
+    // yet." Normalize to a single opaque phrase.
+    if (/^error:.*(invalid process|current process|no process)/i.test(firstLine)) {
+        return 'target loaded (no process)';
+    }
+    if (/^Process\s+\d+\s+stopped/i.test(firstLine)) {
+        // Append file:line from `frame info` when available — turns
+        // "Process 12345 stopped" into
+        // "Process 12345 stopped at parser.rs:42 (frame #0 myapp::parse)".
+        let frameDetail = '';
+        try {
+            const frameOut = await runLldbCommand(session, 'frame info');
+            const frameLine = (frameOut || '')
+                .split('\n')
+                .map(l => l.trim())
+                .find(l => l.length > 0) || '';
+            if (frameLine) frameDetail = ` — ${frameLine}`;
+        } catch {
+            // Leave frameDetail empty on error.
+        }
+        return `${firstLine}${frameDetail}`;
+    }
+    return firstLine;
 }
 
 function shellQuote(s) {
@@ -561,7 +623,7 @@ server.registerTool(
     'lldb_start',
     {
         description:
-            'Spawn a new rust-lldb session. Provide `binary` (path to executable) and/or `core` (path to core dump). `preload` is an optional list of LLDB commands to run before the MCP server takes over — use it to set breakpoints and launch the target to a stopped state (e.g. ["breakpoint set --name rust_panic", "run"]). Process-executing commands (run, continue, process launch/kill, step) hang if issued via lldb_command, so put them in preload instead. Preload commands run to completion before the MCP socket appears — a slow `run` against a debug build counts against the socket-wait budget; raise `socket_wait_ms` (or set the LLDB_MCP_SOCKET_WAIT_MS env var) when the default 5000 ms is tight. Returns { session_id } for use with lldb_command/lldb_stop.',
+            'Debugger for Rust binaries, tests, and core dumps. Spawn a new rust-lldb session to set breakpoints, debug panics or segfaults, inspect stack frames and variables post-mortem. Provide `binary` (path to executable) and/or `core` (path to core dump). `preload` is an optional list of LLDB commands to run before the MCP server takes over — use it to set breakpoints and launch the target to a stopped state (e.g. ["breakpoint set --name rust_panic", "run"]). Process-executing commands (run, continue, process launch/kill, step) hang if issued via lldb_command, so put them in preload instead. Preload commands run to completion before the MCP socket appears — a slow `run` against a debug build counts against the socket-wait budget; raise `socket_wait_ms` (or set the LLDB_MCP_SOCKET_WAIT_MS env var) when the default 5000 ms is tight. Returns { session_id, binary, core, preload_count, stop_summary } where stop_summary is a best-effort one-liner about the inferior state (e.g. "Process 12345 stopped — frame #0 ...").',
         inputSchema: {
             binary: z.string().optional().describe('Path to an executable to debug.'),
             core: z.string().optional().describe('Path to a core dump.'),
@@ -595,7 +657,7 @@ server.registerTool(
     'lldb_command',
     {
         description:
-            'Run an LLDB command in an existing session. The command string is passed to LLDB exactly as typed at the (lldb) prompt. Returns { output, truncated?, dropped_chars? }. Note: LLDB\'s `breakpoint set --condition` evaluator is unreliable for Rust struct-field access (e.g. `self.field == 42` silently evaluates-true on every hit); prefer `--ignore-count N`, `--one-shot true`, `$__lldb_hitcount == N`, or plain register/address equality.',
+            'Debugger command: run any LLDB command in an existing session to set breakpoints, inspect stack frames, read variables, disassemble, or query process state. The command string is passed to LLDB exactly as typed at the (lldb) prompt. Returns { output, truncated?, dropped_chars? }. Note: LLDB\'s `breakpoint set --condition` evaluator is unreliable for Rust struct-field access (e.g. `self.field == 42` silently evaluates-true on every hit); prefer `--ignore-count N`, `--one-shot true`, `$__lldb_hitcount == N`, or plain register/address equality.',
         inputSchema: {
             session_id: z.number().int().describe('Session id returned by lldb_start.'),
             command: z.string().describe('LLDB command string (e.g. "bt 10", "frame variable foo").'),
@@ -615,7 +677,7 @@ server.registerTool(
     'lldb_stop',
     {
         description:
-            'Tear down an LLDB session, killing the rust-lldb process and removing its Unix socket.',
+            'Debugger shutdown: tear down an LLDB session, killing the rust-lldb process and removing its Unix socket. Call this when finished debugging a Rust binary or core dump.',
         inputSchema: {
             session_id: z.number().int().describe('Session id returned by lldb_start.'),
         },

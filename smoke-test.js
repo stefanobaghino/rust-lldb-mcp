@@ -159,6 +159,14 @@ async function main() {
         const sid = started.value?.session_id;
         if (typeof sid === 'number') ok(`lldb_start -> session_id=${sid}`);
         else { bad(`no session_id: ${JSON.stringify(started)}`); failures++; throw new Error('cannot proceed'); }
+        if (started.value?.binary === '/bin/ls' &&
+            started.value?.preload_count === 0 &&
+            started.value?.stop_summary === 'target loaded (no process)') {
+            ok(`enriched payload: binary=${started.value.binary}, preload_count=${started.value.preload_count}, stop_summary="${started.value.stop_summary}"`);
+        } else {
+            bad(`enriched payload missing/wrong: ${JSON.stringify(started.value)}`);
+            failures++;
+        }
 
         info('lldb_command: breakpoint set --name main');
         const bp = parseToolResult(await request('tools/call', {
