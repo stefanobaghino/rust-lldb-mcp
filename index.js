@@ -595,7 +595,7 @@ server.registerTool(
     'lldb_command',
     {
         description:
-            'Run an LLDB command in an existing session. The command string is passed to LLDB exactly as typed at the (lldb) prompt. Returns { output, truncated?, dropped_chars? }.',
+            'Run an LLDB command in an existing session. The command string is passed to LLDB exactly as typed at the (lldb) prompt. Returns { output, truncated?, dropped_chars? }. Note: LLDB\'s `breakpoint set --condition` evaluator is unreliable for Rust struct-field access (e.g. `self.field == 42` silently evaluates-true on every hit); prefer `--ignore-count N`, `--one-shot true`, `$__lldb_hitcount == N`, or plain register/address equality.',
         inputSchema: {
             session_id: z.number().int().describe('Session id returned by lldb_start.'),
             command: z.string().describe('LLDB command string (e.g. "bt 10", "frame variable foo").'),
