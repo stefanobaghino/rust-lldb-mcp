@@ -12,8 +12,10 @@ MCP client  <--stdio MCP-->  rust-lldb-mcp  <--Unix socket MCP-->  rust-lldb
 
 `lldb_start` spawns `rust-lldb`, loads the target, runs any preload commands,
 and opens LLDB's built-in `protocol-server start MCP` on a per-session Unix
-socket. `lldb_command` proxies LLDB commands over that socket. `lldb_stop`
-tears it all down. Idle cost: zero.
+socket. `lldb_command` proxies LLDB commands over that socket.
+`lldb_restart` tears down and respawns in one call (useful for advancing past
+a breakpoint when LLDB's MCP can't handle `continue`). `lldb_stop` tears it
+all down. Idle cost: zero.
 
 ## Why this exists
 
@@ -52,9 +54,9 @@ claude mcp list | grep rust-lldb   # should show "✓ Connected"
 ```
 
 Start a fresh Claude Code session; `mcp__rust_lldb__lldb_start`,
-`mcp__rust_lldb__lldb_command`, and `mcp__rust_lldb__lldb_stop` appear
-in the toolbox. The tool surface is driven entirely by this project; no
-per-project configuration is needed.
+`mcp__rust_lldb__lldb_command`, `mcp__rust_lldb__lldb_restart`, and
+`mcp__rust_lldb__lldb_stop` appear in the toolbox. The tool surface is
+driven entirely by this project; no per-project configuration is needed.
 
 ### Smoke test
 
@@ -62,9 +64,10 @@ per-project configuration is needed.
 node smoke-test.js
 ```
 
-Exercises the three tools against `/bin/ls`, the `process_command_rejected`
+Exercises the four tools against `/bin/ls`, the `process_command_rejected`
 guardrail, typical failure modes (`binary_not_found`, `session_not_found`,
-double-stop), and the socket-wait timeout path. The last part builds a tiny
+double-stop), the restart-chain (old id invalidated, new preload carried
+over), and the socket-wait timeout path. The last part builds a tiny
 C binary with `cc -g` that sleeps during preload, so the host needs `cc`
 (clang on macOS, gcc on Linux — both are usually already present) on
 `PATH`. Expect all green; after exit, `/tmp/rust-lldb-mcp.*.sock`
@@ -72,7 +75,7 @@ should be empty and `pgrep -f rust-lldb` should return nothing.
 
 ## Tool surface
 
-### `lldb_start({ binary?, core?, preload?, socket_wait_ms? }) → { session_id }`
+### `lldb_start({ binary?, core?, preload?, socket_wait_ms? }) → { session_id, binary, core, preload_count, stop_summary }`
 
 Spawn a new `rust-lldb` and load the target. At least one of `binary`
 (path to an executable) or `core` (path to a core dump) is required.
@@ -89,6 +92,15 @@ slow-to-start debug build eats the default. Default 5000, clamped to
 `invalid_request`. The `LLDB_MCP_SOCKET_WAIT_MS` env var on the
 orchestrator process is a fallback when the argument is absent.
 
+`stop_summary` in the return payload is a best-effort one-line
+description of the inferior state after preload (e.g.
+`"Process 12345 stopped — frame #0 myapp\`main at main.rs:42"`,
+`"Process 12345 exited with status = 0"`, `"target loaded (no process)"`)
+so callers can confirm their preload landed where expected without a
+separate `process status` round-trip. `binary` / `core` are echoed back
+verbatim (or `null` when absent) and `preload_count` is the number of
+preload entries used.
+
 Errors (`code` field in the error payload): `invalid_request`,
 `binary_not_found`, `core_not_found`, `lldb_spawn_failed`,
 `socket_never_appeared`, `initialize_failed`, `target_create_failed`,
@@ -104,6 +116,34 @@ dropped …]` footer and `truncated: true, dropped_chars: N` metadata.
 
 Errors: `session_not_found`, `lldb_crashed`, `timeout`, `lldb_rpc_error`,
 `process_command_rejected`.
+
+### `lldb_restart({ session_id, preload? }) → { session_id, previous_session_id, binary, core, preload_count, stop_summary }`
+
+Tear down an existing session and spawn a fresh one against the same
+`binary` / `core` in a single call. Use when you need to resume past a
+breakpoint, change the preload (e.g. move the breakpoint, add a new
+one), or re-run to the same stop: the orchestrator's cheap spawn
+semantics make this the preferred alternative to the `process continue`
+/ `step` commands that hang LLDB's MCP server.
+
+`preload` overrides the previous session's preload when provided;
+otherwise the previous preload is reused verbatim (convenient for
+"re-run to the same breakpoint"). `socket_wait_ms` is inherited from
+the previous session — a slow preload that succeeded once will succeed
+again on restart.
+
+The returned `session_id` is **always fresh** — the old id is
+invalidated atomically, before teardown begins, so any concurrent
+`lldb_command` on the old id gets a clean `session_not_found` rather
+than racing a half-torn-down session. `previous_session_id` echoes the
+old id for traceability. The rest of the payload matches `lldb_start`.
+
+Errors: `session_not_found` (old id unknown), `invalid_request` (bad
+`preload`), plus everything `lldb_start` can return when the respawn
+fails (`binary_not_found`, `core_not_found`, `lldb_spawn_failed`,
+`socket_never_appeared`, `initialize_failed`, `target_create_failed`,
+`too_many_sessions`). On respawn failure, the old session is already
+gone — call `lldb_start` fresh.
 
 ### `lldb_stop({ session_id }) → { ok: true }`
 
@@ -127,8 +167,12 @@ already at a known stop. The orchestrator rejects the same commands from
 `lldb_command` with a typed `process_command_rejected` error, steering
 callers at the fix.
 
-To resume (step, continue), `lldb_stop` the current session and
-`lldb_start` a new one with updated `preload`.
+To resume (step, continue, re-run past a breakpoint), call
+`lldb_restart({ session_id, preload: [...new commands..., "run"] })`:
+it tears down the current session and spawns a fresh one against the
+same binary/core in one call, returning a new `session_id`. Omit
+`preload` to reuse the previous preload verbatim. `lldb_stop` +
+`lldb_start` still works and is the right tool when switching binaries.
 
 ## Example: debug a Rust panic
 

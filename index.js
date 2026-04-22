@@ -542,7 +542,7 @@ async function commandSession({ session_id, command }) {
     if (classifyCommand(command) === 'hang') {
         throw new LldbError(
             'process_command_rejected',
-            `"${command}" resumes the inferior, which hangs LLDB's MCP server. Put it in lldb_start({preload:[...]}) to run it before MCP takes over, or call lldb_stop and restart the session with an updated preload.`,
+            `"${command}" resumes the inferior, which hangs LLDB's MCP server. Put it in lldb_start({preload:[...]}) to run it before MCP takes over, or call lldb_restart({session_id, preload:[...]}) to respawn the session with an updated preload.`,
         );
     }
     const output = await runLldbCommand(session, command);
@@ -586,6 +586,68 @@ async function stopSession({ session_id }) {
     sessions.delete(session_id);
     await teardownSession(session);
     return { ok: true };
+}
+
+// Tear down an existing session and spawn a fresh one against the same
+// binary/core. Mints a new session_id — never reuses the old one — so
+// pid aliasing and "same id, different process" telemetry confusion are
+// avoided. Returns the same enriched payload shape as lldb_start, plus
+// `previous_session_id` for traceability.
+async function restartSession({ session_id, preload }) {
+    const session = sessions.get(session_id);
+    if (!session) {
+        throw new LldbError('session_not_found', `no such session: ${session_id}`);
+    }
+    if (preload !== undefined && preload !== null && !Array.isArray(preload)) {
+        throw new LldbError('invalid_request', 'preload must be an array of strings');
+    }
+    const prev = session.startArgs;
+    if (!prev) {
+        // Should not happen — startArgs is populated before the session is
+        // inserted into the map. Guard just in case.
+        throw new LldbError(
+            'internal_error',
+            `session ${session_id} has no recorded start args; cannot restart`,
+        );
+    }
+    // Atomic handoff: remove the old id from the map *before* awaiting
+    // teardown, so any concurrent lldb_command on the old id gets a clean
+    // session_not_found instead of racing against a half-torn-down session.
+    sessions.delete(session_id);
+    await teardownSession(session);
+
+    const nextPreload = preload !== undefined && preload !== null
+        ? preload
+        : prev.preload;
+    const spawnArgs = {
+        binary: prev.binary ?? undefined,
+        core: prev.core ?? undefined,
+        preload: nextPreload,
+    };
+    if (prev.socket_wait_ms !== null && prev.socket_wait_ms !== undefined) {
+        spawnArgs.socket_wait_ms = prev.socket_wait_ms;
+    }
+    let started;
+    try {
+        started = await startSession(spawnArgs);
+    } catch (err) {
+        // Old session is gone; respawn failed. Surface the error with the
+        // previous id annotated so the caller can tie the failure back to
+        // the restart call site.
+        if (err instanceof LldbError) {
+            err.details = { ...(err.details || {}), previous_session_id: session_id };
+            throw err;
+        }
+        throw new LldbError(
+            'internal_error',
+            `lldb_restart respawn failed after teardown of session ${session_id}: ${err.message}`,
+            { previous_session_id: session_id },
+        );
+    }
+    return {
+        ...started,
+        previous_session_id: session_id,
+    };
 }
 
 async function shutdownAll() {
@@ -687,6 +749,31 @@ server.registerTool(
             return toToolResult(await stopSession(args));
         } catch (err) {
             log(`lldb_stop failed (session=${args.session_id}):`, err.code || '', err.message);
+            return toToolError(err);
+        }
+    },
+);
+
+server.registerTool(
+    'lldb_restart',
+    {
+        description:
+            'Debugger restart: tear down an existing rust-lldb session and spawn a fresh one against the same binary or core dump, optionally with a new preload (e.g. "move the breakpoint, re-run to the next site"). Reuses the previous preload when `preload` is omitted. Always returns a fresh session_id — the old id is invalidated. Use this instead of lldb_stop + lldb_start when you need to resume execution past breakpoint hits, since process-executing commands (continue, step, run) hang if issued via lldb_command.',
+        inputSchema: {
+            session_id: z.number().int().describe('Session id returned by a prior lldb_start/lldb_restart.'),
+            preload: z
+                .array(z.string())
+                .optional()
+                .describe(
+                    'Optional new preload for the respawned session. When omitted, the previous session\'s preload is reused verbatim.',
+                ),
+        },
+    },
+    async (args) => {
+        try {
+            return toToolResult(await restartSession(args));
+        } catch (err) {
+            log(`lldb_restart failed (session=${args.session_id}):`, err.code || '', err.message);
             return toToolError(err);
         }
     },

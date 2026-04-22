@@ -138,7 +138,7 @@ async function main() {
         info('tools/list');
         const tools = await request('tools/list', {});
         const names = (tools?.tools || []).map(t => t.name).sort();
-        const expected = ['lldb_command', 'lldb_start', 'lldb_stop'];
+        const expected = ['lldb_command', 'lldb_restart', 'lldb_start', 'lldb_stop'];
         if (JSON.stringify(names) === JSON.stringify(expected)) ok(`tools/list: ${names.join(', ')}`);
         else { bad(`tools/list: got ${JSON.stringify(names)}, want ${JSON.stringify(expected)}`); failures++; }
 
@@ -224,6 +224,113 @@ async function main() {
         }));
         if (stopAgain.isError && stopAgain.value?.code === 'session_not_found') ok('double-stop surfaced session_not_found');
         else { bad(`expected session_not_found on double-stop, got: ${JSON.stringify(stopAgain)}`); failures++; }
+
+        // --- Restart scenarios ---
+        //
+        // lldb_restart should tear down the old session, spawn a fresh
+        // one against the same binary, mint a new session_id, and echo
+        // previous_session_id. The old id should then reject commands
+        // with session_not_found.
+
+        info('lldb_start (for restart test)');
+        const preRestart = parseToolResult(await request('tools/call', {
+            name: 'lldb_start',
+            arguments: { binary: '/bin/ls' },
+        }, 15000));
+        const sidA = preRestart.value?.session_id;
+        if (typeof sidA !== 'number') {
+            bad(`restart setup failed: ${JSON.stringify(preRestart)}`);
+            failures++;
+        } else {
+            ok(`restart setup -> session_id=${sidA}`);
+
+            info('lldb_restart with new preload -> fresh session_id');
+            const restarted = parseToolResult(await request('tools/call', {
+                name: 'lldb_restart',
+                arguments: {
+                    session_id: sidA,
+                    preload: ['breakpoint set --name main'],
+                },
+            }, 15000));
+            const sidB = restarted.value?.session_id;
+            if (!restarted.isError &&
+                typeof sidB === 'number' &&
+                sidB !== sidA &&
+                restarted.value?.previous_session_id === sidA &&
+                restarted.value?.binary === '/bin/ls' &&
+                restarted.value?.preload_count === 1) {
+                ok(`lldb_restart -> session_id=${sidB}, previous_session_id=${sidA}`);
+            } else {
+                bad(`lldb_restart unexpected: ${JSON.stringify(restarted)}`);
+                failures++;
+            }
+
+            if (typeof sidB === 'number') {
+                info('lldb_command on old session_id -> session_not_found');
+                const onOld = parseToolResult(await request('tools/call', {
+                    name: 'lldb_command',
+                    arguments: { session_id: sidA, command: 'version' },
+                }));
+                if (onOld.isError && onOld.value?.code === 'session_not_found') {
+                    ok('old session_id rejected after restart');
+                } else {
+                    bad(`expected session_not_found on old id, got: ${JSON.stringify(onOld)}`);
+                    failures++;
+                }
+
+                info('lldb_command on new session: breakpoint list reflects new preload');
+                const bpList = parseToolResult(await request('tools/call', {
+                    name: 'lldb_command',
+                    arguments: { session_id: sidB, command: 'breakpoint list' },
+                }));
+                if (!bpList.isError &&
+                    typeof bpList.value?.output === 'string' &&
+                    /main/i.test(bpList.value.output)) {
+                    ok('new session carries restart-provided breakpoint');
+                } else {
+                    bad(`breakpoint list unexpected: ${JSON.stringify(bpList)}`);
+                    failures++;
+                }
+
+                info('lldb_restart with no preload reuses previous preload');
+                const restarted2 = parseToolResult(await request('tools/call', {
+                    name: 'lldb_restart',
+                    arguments: { session_id: sidB },
+                }, 15000));
+                const sidC = restarted2.value?.session_id;
+                if (!restarted2.isError &&
+                    typeof sidC === 'number' &&
+                    sidC !== sidB &&
+                    restarted2.value?.preload_count === 1) {
+                    ok(`lldb_restart (no preload arg) reuses previous -> session_id=${sidC}`);
+                } else {
+                    bad(`lldb_restart (reuse) unexpected: ${JSON.stringify(restarted2)}`);
+                    failures++;
+                }
+
+                if (typeof sidC === 'number') {
+                    info(`lldb_stop restart-chain session ${sidC}`);
+                    const stopC = parseToolResult(await request('tools/call', {
+                        name: 'lldb_stop',
+                        arguments: { session_id: sidC },
+                    }, 5000));
+                    if (!stopC.isError && stopC.value?.ok === true) ok('lldb_stop (restart chain) OK');
+                    else { bad(`lldb_stop (restart chain) unexpected: ${JSON.stringify(stopC)}`); failures++; }
+                }
+            }
+
+            info('lldb_restart on already-stopped session -> session_not_found');
+            const restartDead = parseToolResult(await request('tools/call', {
+                name: 'lldb_restart',
+                arguments: { session_id: sidA },
+            }));
+            if (restartDead.isError && restartDead.value?.code === 'session_not_found') {
+                ok('restart of gone session surfaced session_not_found');
+            } else {
+                bad(`expected session_not_found on gone id, got: ${JSON.stringify(restartDead)}`);
+                failures++;
+            }
+        }
 
         // --- Slow preload scenarios (real-workload shape) ---
         //
