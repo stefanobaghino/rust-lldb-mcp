@@ -53,6 +53,10 @@ claude mcp add --scope user rust-lldb -- "$PWD/index.js"
 claude mcp list | grep rust-lldb   # should show "✓ Connected"
 ```
 
+The name `rust-lldb` in that command is load-bearing: the bundled skill
+hardcodes `mcp__rust-lldb__*` as the tool prefix. If you register under a
+different name, the skill won't see the tools.
+
 Start a fresh Claude Code session; `mcp__rust-lldb__lldb_start`,
 `mcp__rust-lldb__lldb_command`, `mcp__rust-lldb__lldb_restart`, and
 `mcp__rust-lldb__lldb_stop` appear in the toolbox. The tool surface is

@@ -221,6 +221,9 @@ async function startSession({ binary, core, preload, socket_wait_ms }) {
     }
 
     const id = nextSessionId++;
+    // Hardcoded /tmp (not os.tmpdir()): macOS TMPDIR lives under /var/folders/.../T/,
+    // which can push past the 104-byte sun_path limit on Unix sockets. /tmp exists
+    // and is writable on both macOS and Linux, and keeps the full socket path short.
     const socketPath = `/tmp/rust-lldb-mcp.${process.pid}.${nextSocketCounter++}.sock`;
 
     // Best-effort: remove any stale socket file at the target path.
