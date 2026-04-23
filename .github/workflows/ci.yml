@@ -1,0 +1,73 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Least-privilege: every job is read-only against the repo and has no secrets
+# exposed. Elevate per-job/per-step only when a future workflow genuinely needs
+# write access.
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        # Pinned by full commit SHA (not tag): prevents a compromised tag
+        # from silently shipping new code. Dependabot (github-actions
+        # ecosystem) updates these pins automatically.
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Set up Rust stable
+        # Provides `rustup`, which brings the `rust-lldb` wrapper script that
+        # the orchestrator spawns.
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: Install LLDB 21
+        # apt.llvm.org's helper script is piped to sudo bash. We accept this
+        # residual risk deliberately: it runs only on the ephemeral runner,
+        # never reaches user workstations or published artifacts, and there
+        # is no stable upstream sha256 for llvm.sh. Tracked for revisit.
+        run: |
+          wget -qO llvm.sh https://apt.llvm.org/llvm.sh
+          sudo bash llvm.sh 21
+          sudo update-alternatives --install /usr/bin/lldb lldb /usr/bin/lldb-21 100
+          lldb --version
+
+      - name: Verify rust-lldb + protocol-server
+        # Fast-fail: if this probe doesn't print "MCP server started …", the
+        # smoke test is guaranteed to fail downstream. Surfacing it here keeps
+        # the failure message actionable.
+        run: |
+          which rust-lldb
+          rust-lldb -b -o "protocol-server start MCP accept:///tmp/probe.sock" -o "protocol-server stop MCP"
+
+      - name: Install npm dependencies
+        # `npm ci` respects package-lock.json and verifies SHA-512 tarball
+        # integrity on every install — unlike `npm install`, which may widen
+        # ranges or skip lockfile checks.
+        run: npm ci
+
+      - name: Lint (biome ci)
+        run: npm run lint
+
+      - name: Unit tests
+        run: npm test
+
+      - name: npm audit (advisory)
+        # Advisory-only for now. Promote to blocking after one clean run —
+        # tracked in the productization issue.
+        run: npm audit --omit=dev --audit-level=high
+        continue-on-error: true
+
+      - name: Smoke test (end-to-end)
+        run: npm run smoke
