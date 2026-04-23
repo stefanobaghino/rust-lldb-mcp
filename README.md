@@ -34,7 +34,7 @@ supported.
 - **`rust-lldb`** on `PATH` — the rustup wrapper that loads Rust
   pretty-printers. Installed with the Rust toolchain.
 - **LLDB 21+** (or Apple's LLDB from Xcode 16+ CLT) — verified by
-  `rust-lldb -b -o "protocol-server start MCP accept:///tmp/probe.sock" -o "protocol-server stop"`
+  `rust-lldb -b -o "protocol-server start MCP accept:///tmp/probe.sock" -o "protocol-server stop MCP"`
   emitting `MCP server started …`. Older LLDBs lack `protocol-server` and
   won't work.
 
