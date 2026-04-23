@@ -10,10 +10,10 @@
 // stdout is owned by the outer MCP SDK. All logs go to stderr.
 
 import { spawn } from 'node:child_process';
+import { constants as fsConstants } from 'node:fs';
+import { access, unlink } from 'node:fs/promises';
 import { createConnection } from 'node:net';
 import { PassThrough } from 'node:stream';
-import { access, unlink } from 'node:fs/promises';
-import { constants as fsConstants } from 'node:fs';
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
@@ -22,10 +22,13 @@ import { z } from 'zod';
 import { classifyCommand, LldbError, resolveSocketWaitMs, shellQuote } from './lib.js';
 
 const MAX_SESSIONS = 8;
-// Socket-wait budget for lldb's MCP protocol-server — argument > env var
-// > default — plus clamping lives in lib.js. Override via `socket_wait_ms`
-// on `lldb_start` or the `LLDB_MCP_SOCKET_WAIT_MS` env var when preload
-// is heavy.
+// Default socket-wait budget for lldb's MCP protocol-server to open its
+// Unix socket. Preload commands run *before* the socket appears, so a
+// slow `run` against a debug build can easily need more than a couple
+// of seconds. The default is a fast-fail ceiling for well-behaved
+// invocations; override via `socket_wait_ms` on `lldb_start` or the
+// `LLDB_MCP_SOCKET_WAIT_MS` env var when preload is heavy. The actual
+// resolution (argument > env > default) plus clamping lives in lib.js.
 const SOCKET_POLL_MS = 50;
 const LLDB_CMD_TIMEOUT_MS = 60000;
 const INITIALIZE_TIMEOUT_MS = 5000;
@@ -92,12 +95,14 @@ class Session {
             const timer = setTimeout(() => {
                 if (this.pending.has(id)) {
                     this.pending.delete(id);
-                    reject(new LldbError('timeout', `LLDB ${method} timed out after ${timeoutMs}ms`));
+                    reject(
+                        new LldbError('timeout', `LLDB ${method} timed out after ${timeoutMs}ms`),
+                    );
                 }
             }, timeoutMs);
             this.pending.set(id, { resolve, reject, timer });
             try {
-                this.socket.write(JSON.stringify(payload) + '\n');
+                this.socket.write(`${JSON.stringify(payload)}\n`);
             } catch (err) {
                 clearTimeout(timer);
                 this.pending.delete(id);
@@ -110,7 +115,7 @@ class Session {
         if (this.dead) return;
         const payload = { jsonrpc: '2.0', method, params };
         try {
-            this.socket.write(JSON.stringify(payload) + '\n');
+            this.socket.write(`${JSON.stringify(payload)}\n`);
         } catch (err) {
             log(`session ${this.id}: notify write failed:`, err.message);
         }
@@ -119,7 +124,7 @@ class Session {
     markDead(reason) {
         if (this.dead) return;
         this.dead = true;
-        for (const [id, entry] of this.pending) {
+        for (const [_id, entry] of this.pending) {
             if (entry.timer) clearTimeout(entry.timer);
             entry.reject(new LldbError('lldb_crashed', reason || 'LLDB session exited'));
         }
@@ -142,7 +147,7 @@ async function waitForSocket(path, child, timeoutMs) {
         } catch {
             // not there yet
         }
-        await new Promise(r => setTimeout(r, SOCKET_POLL_MS));
+        await new Promise((r) => setTimeout(r, SOCKET_POLL_MS));
     }
     throw new LldbError(
         'socket_never_appeared',
@@ -161,10 +166,7 @@ async function fileExists(path) {
 
 async function startSession({ binary, core, preload, socket_wait_ms }) {
     if (!binary && !core) {
-        throw new LldbError(
-            'invalid_request',
-            'lldb_start requires at least one of: binary, core',
-        );
+        throw new LldbError('invalid_request', 'lldb_start requires at least one of: binary, core');
     }
     if (binary && !(await fileExists(binary))) {
         throw new LldbError('binary_not_found', `binary does not exist: ${binary}`);
@@ -243,7 +245,9 @@ async function startSession({ binary, core, preload, socket_wait_ms }) {
     try {
         await waitForSocket(socketPath, child, socketWaitMs);
     } catch (err) {
-        try { child.kill('SIGKILL'); } catch {}
+        try {
+            child.kill('SIGKILL');
+        } catch {}
         stdinKeepalive.destroy();
         await unlink(socketPath).catch(() => {});
         if (spawnError) {
@@ -264,7 +268,9 @@ async function startSession({ binary, core, preload, socket_wait_ms }) {
             });
         });
     } catch (err) {
-        try { child.kill('SIGKILL'); } catch {}
+        try {
+            child.kill('SIGKILL');
+        } catch {}
         stdinKeepalive.destroy();
         await unlink(socketPath).catch(() => {});
         throw new LldbError(
@@ -279,8 +285,9 @@ async function startSession({ binary, core, preload, socket_wait_ms }) {
     socket.setEncoding('utf8');
     socket.on('data', (chunk) => {
         session.buffer += chunk;
-        let newlineIdx;
-        while ((newlineIdx = session.buffer.indexOf('\n')) !== -1) {
+        while (true) {
+            const newlineIdx = session.buffer.indexOf('\n');
+            if (newlineIdx === -1) break;
             const line = session.buffer.slice(0, newlineIdx);
             session.buffer = session.buffer.slice(newlineIdx + 1);
             if (!line.trim()) continue;
@@ -391,10 +398,11 @@ async function probeStopSummary(session) {
     } catch {
         return 'unknown';
     }
-    const firstLine = (statusOut || '')
-        .split('\n')
-        .map(l => l.trim())
-        .find(l => l.length > 0) || '';
+    const firstLine =
+        (statusOut || '')
+            .split('\n')
+            .map((l) => l.trim())
+            .find((l) => l.length > 0) || '';
     if (!firstLine) return 'target loaded (no process)';
     // "error: invalid process" (LLDB 21), "error: Command requires a current
     // process." (Apple LLDB) — both mean "target is loaded but nothing has run
@@ -409,10 +417,11 @@ async function probeStopSummary(session) {
         let frameDetail = '';
         try {
             const frameOut = await runLldbCommand(session, 'frame info');
-            const frameLine = (frameOut || '')
-                .split('\n')
-                .map(l => l.trim())
-                .find(l => l.length > 0) || '';
+            const frameLine =
+                (frameOut || '')
+                    .split('\n')
+                    .map((l) => l.trim())
+                    .find((l) => l.length > 0) || '';
             if (frameLine) frameDetail = ` — ${frameLine}`;
         } catch {
             // Leave frameDetail empty on error.
@@ -466,11 +475,19 @@ async function commandSession({ session_id, command }) {
 async function teardownSession(session) {
     if (session.closing) return;
     session.closing = true;
-    try { session.socket.end(); } catch {}
-    try { session.socket.destroy(); } catch {}
-    try { session.stdinKeepalive?.destroy(); } catch {}
+    try {
+        session.socket.end();
+    } catch {}
+    try {
+        session.socket.destroy();
+    } catch {}
+    try {
+        session.stdinKeepalive?.destroy();
+    } catch {}
     if (session.child && session.child.exitCode === null) {
-        try { session.child.kill('SIGTERM'); } catch {}
+        try {
+            session.child.kill('SIGTERM');
+        } catch {}
         const stopped = await new Promise((resolve) => {
             const t = setTimeout(() => resolve(false), STOP_SIGTERM_WAIT_MS);
             session.child.once('exit', () => {
@@ -479,7 +496,9 @@ async function teardownSession(session) {
             });
         });
         if (!stopped) {
-            try { session.child.kill('SIGKILL'); } catch {}
+            try {
+                session.child.kill('SIGKILL');
+            } catch {}
         }
     }
     await unlink(session.socketPath).catch(() => {});
@@ -523,9 +542,7 @@ async function restartSession({ session_id, preload }) {
     sessions.delete(session_id);
     await teardownSession(session);
 
-    const nextPreload = preload !== undefined && preload !== null
-        ? preload
-        : prev.preload;
+    const nextPreload = preload !== undefined && preload !== null ? preload : prev.preload;
     const spawnArgs = {
         binary: prev.binary ?? undefined,
         core: prev.core ?? undefined,
@@ -567,9 +584,14 @@ async function shutdownAll() {
 // MCP server boilerplate
 
 function toToolError(err) {
-    const payload = err instanceof LldbError
-        ? { code: err.code, message: err.message, ...(err.details ? { details: err.details } : {}) }
-        : { code: 'internal_error', message: err?.message || String(err) };
+    const payload =
+        err instanceof LldbError
+            ? {
+                  code: err.code,
+                  message: err.message,
+                  ...(err.details ? { details: err.details } : {}),
+              }
+            : { code: 'internal_error', message: err?.message || String(err) };
     return {
         isError: true,
         content: [{ type: 'text', text: JSON.stringify(payload) }],
@@ -608,7 +630,7 @@ server.registerTool(
                 .positive()
                 .optional()
                 .describe(
-                    'Milliseconds to wait for lldb\'s MCP socket to appear after preload finishes. Default 5000; clamped to [500, 120000]. LLDB_MCP_SOCKET_WAIT_MS env var is a fallback when this argument is absent.',
+                    "Milliseconds to wait for lldb's MCP socket to appear after preload finishes. Default 5000; clamped to [500, 120000]. LLDB_MCP_SOCKET_WAIT_MS env var is a fallback when this argument is absent.",
                 ),
         },
     },
@@ -626,10 +648,12 @@ server.registerTool(
     'lldb_command',
     {
         description:
-            'Debugger command: run any LLDB command in an existing session to set breakpoints, inspect stack frames, read variables, disassemble, or query process state. The command string is passed to LLDB exactly as typed at the (lldb) prompt. Returns { output, truncated?, dropped_chars? }. Note: LLDB\'s `breakpoint set --condition` evaluator is unreliable for Rust struct-field access (e.g. `self.field == 42` silently evaluates-true on every hit); prefer `--ignore-count N`, `--one-shot true`, `$__lldb_hitcount == N`, or plain register/address equality.',
+            "Debugger command: run any LLDB command in an existing session to set breakpoints, inspect stack frames, read variables, disassemble, or query process state. The command string is passed to LLDB exactly as typed at the (lldb) prompt. Returns { output, truncated?, dropped_chars? }. Note: LLDB's `breakpoint set --condition` evaluator is unreliable for Rust struct-field access (e.g. `self.field == 42` silently evaluates-true on every hit); prefer `--ignore-count N`, `--one-shot true`, `$__lldb_hitcount == N`, or plain register/address equality.",
         inputSchema: {
             session_id: z.number().int().describe('Session id returned by lldb_start.'),
-            command: z.string().describe('LLDB command string (e.g. "bt 10", "frame variable foo").'),
+            command: z
+                .string()
+                .describe('LLDB command string (e.g. "bt 10", "frame variable foo").'),
         },
     },
     async (args) => {
@@ -667,12 +691,15 @@ server.registerTool(
         description:
             'Debugger restart: tear down an existing rust-lldb session and spawn a fresh one against the same binary or core dump, optionally with a new preload (e.g. "move the breakpoint, re-run to the next site"). Reuses the previous preload when `preload` is omitted. Always returns a fresh session_id — the old id is invalidated. Use this instead of lldb_stop + lldb_start when you need to resume execution past breakpoint hits, since process-executing commands (continue, step, run) hang if issued via lldb_command.',
         inputSchema: {
-            session_id: z.number().int().describe('Session id returned by a prior lldb_start/lldb_restart.'),
+            session_id: z
+                .number()
+                .int()
+                .describe('Session id returned by a prior lldb_start/lldb_restart.'),
             preload: z
                 .array(z.string())
                 .optional()
                 .describe(
-                    'Optional new preload for the respawned session. When omitted, the previous session\'s preload is reused verbatim.',
+                    "Optional new preload for the respawned session. When omitted, the previous session's preload is reused verbatim.",
                 ),
         },
     },
@@ -699,7 +726,9 @@ async function shutdown(reason) {
     } catch (err) {
         log('shutdownAll error:', err);
     }
-    try { await server.close(); } catch {}
+    try {
+        await server.close();
+    } catch {}
     // Give async logs a tick to flush.
     setImmediate(() => process.exit(0));
 }

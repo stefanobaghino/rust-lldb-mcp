@@ -10,7 +10,16 @@
   "engines": {
     "node": ">=20"
   },
+  "scripts": {
+    "lint": "biome ci .",
+    "format": "biome format --write .",
+    "test": "node --test test/*.test.js",
+    "smoke": "node smoke-test.js"
+  },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.0.0"
+    "@modelcontextprotocol/sdk": "1.29.0"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.4.12"
   }
 }
