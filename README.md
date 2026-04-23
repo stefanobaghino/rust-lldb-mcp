@@ -58,6 +58,21 @@ Start a fresh Claude Code session; `mcp__rust-lldb__lldb_start`,
 `mcp__rust-lldb__lldb_stop` appear in the toolbox. The tool surface is
 driven entirely by this project; no per-project configuration is needed.
 
+### Install the skill (optional, Claude Code only)
+
+A [skill](https://docs.claude.com/en/docs/claude-code/skills) is bundled
+at [`skills/rust-debug/`](./skills/rust-debug/SKILL.md) with guidance
+for driving the three tools well — when to reach for the debugger, how
+to work around the preload constraint, output-discipline heuristics.
+Install by symlinking it into the user-scope skills directory:
+
+```bash
+ln -s "$PWD/skills/rust-debug" ~/.claude/skills/rust-debug
+```
+
+Proper packaging (self-hosted marketplace + `npx`-based MCP entry) is
+tracked in [#1](https://github.com/stefanobaghino/rust-lldb-mcp/issues/1).
+
 ### Smoke test
 
 ```bash
