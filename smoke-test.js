@@ -3,10 +3,10 @@
 // the three tools plus a few failure modes.
 
 import { spawn } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
 import { mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -21,7 +21,7 @@ const info = (s) => console.log(color('36', '·'), s);
 
 async function listSocketFiles() {
     const files = await readdir('/tmp');
-    return files.filter(f => f.startsWith('rust-lldb-mcp.'));
+    return files.filter((f) => f.startsWith('rust-lldb-mcp.'));
 }
 
 // Compile a tiny C fixture that sleeps longer than the default
@@ -37,7 +37,7 @@ async function buildSlowFixture(sleepSeconds) {
     );
     await new Promise((resolve, reject) => {
         const cc = spawn('cc', ['-g', src, '-o', bin], { stdio: 'inherit' });
-        cc.on('exit', (code) => code === 0 ? resolve() : reject(new Error(`cc exited ${code}`)));
+        cc.on('exit', (code) => (code === 0 ? resolve() : reject(new Error(`cc exited ${code}`))));
         cc.on('error', reject);
     });
     return {
@@ -54,7 +54,7 @@ async function countLldbProcs() {
         // string (e.g. `.../rust-lldb-mcp/index.js`).
         const c = spawn('pgrep', ['-f', 'protocol-server start MCP']);
         let out = '';
-        c.stdout.on('data', d => out += d);
+        c.stdout.on('data', (d) => (out += d));
         c.on('exit', () => resolve(out.trim().split('\n').filter(Boolean).length));
         c.on('error', () => resolve(0));
     });
@@ -70,13 +70,18 @@ function startOrchestrator() {
 
     child.stdout.on('data', (chunk) => {
         buffer += chunk;
-        let nl;
-        while ((nl = buffer.indexOf('\n')) !== -1) {
+        while (true) {
+            const nl = buffer.indexOf('\n');
+            if (nl === -1) break;
             const line = buffer.slice(0, nl);
             buffer = buffer.slice(nl + 1);
             if (!line.trim()) continue;
             let msg;
-            try { msg = JSON.parse(line); } catch { continue; }
+            try {
+                msg = JSON.parse(line);
+            } catch {
+                continue;
+            }
             if (msg.id !== undefined && pending.has(msg.id)) {
                 const { resolve, reject } = pending.get(msg.id);
                 pending.delete(msg.id);
@@ -95,16 +100,22 @@ function startOrchestrator() {
                 reject(new Error(`request ${method} timed out after ${timeoutMs}ms`));
             }, timeoutMs);
             pending.set(id, {
-                resolve: (r) => { clearTimeout(t); resolve(r); },
-                reject: (e) => { clearTimeout(t); reject(e); },
+                resolve: (r) => {
+                    clearTimeout(t);
+                    resolve(r);
+                },
+                reject: (e) => {
+                    clearTimeout(t);
+                    reject(e);
+                },
             });
-            child.stdin.write(JSON.stringify(payload) + '\n');
+            child.stdin.write(`${JSON.stringify(payload)}\n`);
         });
     }
 
     function notify(method, params) {
         const payload = { jsonrpc: '2.0', method, params };
-        child.stdin.write(JSON.stringify(payload) + '\n');
+        child.stdin.write(`${JSON.stringify(payload)}\n`);
     }
 
     return { child, request, notify };
@@ -114,7 +125,11 @@ function parseToolResult(r) {
     if (!r || !Array.isArray(r.content) || !r.content[0]) return { isError: true, raw: r };
     const text = r.content[0].text;
     let parsed;
-    try { parsed = JSON.parse(text); } catch { parsed = { _raw: text }; }
+    try {
+        parsed = JSON.parse(text);
+    } catch {
+        parsed = { _raw: text };
+    }
     return { isError: !!r.isError, value: parsed };
 }
 
@@ -132,98 +147,179 @@ async function main() {
             clientInfo: { name: 'smoke-test', version: '0.0.1' },
         });
         if (init?.serverInfo?.name === 'rust-lldb-mcp') ok('initialize OK');
-        else { bad(`initialize unexpected: ${JSON.stringify(init)}`); failures++; }
+        else {
+            bad(`initialize unexpected: ${JSON.stringify(init)}`);
+            failures++;
+        }
         notify('notifications/initialized', {});
 
         info('tools/list');
         const tools = await request('tools/list', {});
-        const names = (tools?.tools || []).map(t => t.name).sort();
+        const names = (tools?.tools || []).map((t) => t.name).sort();
         const expected = ['lldb_command', 'lldb_restart', 'lldb_start', 'lldb_stop'];
-        if (JSON.stringify(names) === JSON.stringify(expected)) ok(`tools/list: ${names.join(', ')}`);
-        else { bad(`tools/list: got ${JSON.stringify(names)}, want ${JSON.stringify(expected)}`); failures++; }
+        if (JSON.stringify(names) === JSON.stringify(expected))
+            ok(`tools/list: ${names.join(', ')}`);
+        else {
+            bad(`tools/list: got ${JSON.stringify(names)}, want ${JSON.stringify(expected)}`);
+            failures++;
+        }
 
         info('lldb_start with bogus path -> binary_not_found');
-        const bogus = parseToolResult(await request('tools/call', {
-            name: 'lldb_start',
-            arguments: { binary: '/definitely/does/not/exist/xyzzy' },
-        }));
-        if (bogus.isError && bogus.value?.code === 'binary_not_found') ok('binary_not_found surfaced');
-        else { bad(`expected binary_not_found, got: ${JSON.stringify(bogus)}`); failures++; }
+        const bogus = parseToolResult(
+            await request('tools/call', {
+                name: 'lldb_start',
+                arguments: { binary: '/definitely/does/not/exist/xyzzy' },
+            }),
+        );
+        if (bogus.isError && bogus.value?.code === 'binary_not_found')
+            ok('binary_not_found surfaced');
+        else {
+            bad(`expected binary_not_found, got: ${JSON.stringify(bogus)}`);
+            failures++;
+        }
 
         info('lldb_start with /bin/ls');
-        const started = parseToolResult(await request('tools/call', {
-            name: 'lldb_start',
-            arguments: { binary: '/bin/ls' },
-        }, 15000));
-        if (started.isError) { bad(`lldb_start failed: ${JSON.stringify(started)}`); failures++; throw new Error('cannot proceed'); }
+        const started = parseToolResult(
+            await request(
+                'tools/call',
+                {
+                    name: 'lldb_start',
+                    arguments: { binary: '/bin/ls' },
+                },
+                15000,
+            ),
+        );
+        if (started.isError) {
+            bad(`lldb_start failed: ${JSON.stringify(started)}`);
+            failures++;
+            throw new Error('cannot proceed');
+        }
         const sid = started.value?.session_id;
         if (typeof sid === 'number') ok(`lldb_start -> session_id=${sid}`);
-        else { bad(`no session_id: ${JSON.stringify(started)}`); failures++; throw new Error('cannot proceed'); }
-        if (started.value?.binary === '/bin/ls' &&
+        else {
+            bad(`no session_id: ${JSON.stringify(started)}`);
+            failures++;
+            throw new Error('cannot proceed');
+        }
+        if (
+            started.value?.binary === '/bin/ls' &&
             started.value?.preload_count === 0 &&
-            started.value?.stop_summary === 'target loaded (no process)') {
-            ok(`enriched payload: binary=${started.value.binary}, preload_count=${started.value.preload_count}, stop_summary="${started.value.stop_summary}"`);
+            started.value?.stop_summary === 'target loaded (no process)'
+        ) {
+            ok(
+                `enriched payload: binary=${started.value.binary}, preload_count=${started.value.preload_count}, stop_summary="${started.value.stop_summary}"`,
+            );
         } else {
             bad(`enriched payload missing/wrong: ${JSON.stringify(started.value)}`);
             failures++;
         }
 
         info('lldb_command: breakpoint set --name main');
-        const bp = parseToolResult(await request('tools/call', {
-            name: 'lldb_command',
-            arguments: { session_id: sid, command: 'breakpoint set --name main' },
-        }));
-        if (!bp.isError && typeof bp.value?.output === 'string' && /breakpoint/i.test(bp.value.output)) {
+        const bp = parseToolResult(
+            await request('tools/call', {
+                name: 'lldb_command',
+                arguments: { session_id: sid, command: 'breakpoint set --name main' },
+            }),
+        );
+        if (
+            !bp.isError &&
+            typeof bp.value?.output === 'string' &&
+            /breakpoint/i.test(bp.value.output)
+        ) {
             ok(`breakpoint set: ${bp.value.output.split('\n')[0]}`);
-        } else { bad(`breakpoint set unexpected: ${JSON.stringify(bp)}`); failures++; }
+        } else {
+            bad(`breakpoint set unexpected: ${JSON.stringify(bp)}`);
+            failures++;
+        }
 
         info('lldb_command: version');
-        const ver = parseToolResult(await request('tools/call', {
-            name: 'lldb_command',
-            arguments: { session_id: sid, command: 'version' },
-        }));
-        if (!ver.isError && /lldb-/i.test(ver.value?.output || '')) ok(`version: ${ver.value.output.split('\n')[0]}`);
-        else { bad(`version unexpected: ${JSON.stringify(ver)}`); failures++; }
+        const ver = parseToolResult(
+            await request('tools/call', {
+                name: 'lldb_command',
+                arguments: { session_id: sid, command: 'version' },
+            }),
+        );
+        // Apple LLDB reports "lldb-2100.0.16.12"; upstream LLDB 21 reports
+        // "lldb version 21.1.8". Match either shape.
+        if (!ver.isError && /\blldb[- ]/i.test(ver.value?.output || ''))
+            ok(`version: ${ver.value.output.split('\n')[0]}`);
+        else {
+            bad(`version unexpected: ${JSON.stringify(ver)}`);
+            failures++;
+        }
 
         info('lldb_command: run -> process_command_rejected (guardrail)');
-        const rejected = parseToolResult(await request('tools/call', {
-            name: 'lldb_command',
-            arguments: { session_id: sid, command: 'run' },
-        }));
-        if (rejected.isError && rejected.value?.code === 'process_command_rejected') ok('process_command_rejected surfaced');
-        else { bad(`expected process_command_rejected, got: ${JSON.stringify(rejected)}`); failures++; }
+        const rejected = parseToolResult(
+            await request('tools/call', {
+                name: 'lldb_command',
+                arguments: { session_id: sid, command: 'run' },
+            }),
+        );
+        if (rejected.isError && rejected.value?.code === 'process_command_rejected')
+            ok('process_command_rejected surfaced');
+        else {
+            bad(`expected process_command_rejected, got: ${JSON.stringify(rejected)}`);
+            failures++;
+        }
 
         info('lldb_command: process status -> safe (guardrail allowlist)');
-        const procStatus = parseToolResult(await request('tools/call', {
-            name: 'lldb_command',
-            arguments: { session_id: sid, command: 'process status' },
-        }));
-        if (!procStatus.isError && typeof procStatus.value?.output === 'string') ok('process status passed guardrail');
-        else { bad(`process status unexpected: ${JSON.stringify(procStatus)}`); failures++; }
+        const procStatus = parseToolResult(
+            await request('tools/call', {
+                name: 'lldb_command',
+                arguments: { session_id: sid, command: 'process status' },
+            }),
+        );
+        if (!procStatus.isError && typeof procStatus.value?.output === 'string')
+            ok('process status passed guardrail');
+        else {
+            bad(`process status unexpected: ${JSON.stringify(procStatus)}`);
+            failures++;
+        }
 
         info('lldb_command on bogus session_id -> session_not_found');
-        const nofound = parseToolResult(await request('tools/call', {
-            name: 'lldb_command',
-            arguments: { session_id: 9999, command: 'version' },
-        }));
-        if (nofound.isError && nofound.value?.code === 'session_not_found') ok('session_not_found surfaced');
-        else { bad(`expected session_not_found, got: ${JSON.stringify(nofound)}`); failures++; }
+        const nofound = parseToolResult(
+            await request('tools/call', {
+                name: 'lldb_command',
+                arguments: { session_id: 9999, command: 'version' },
+            }),
+        );
+        if (nofound.isError && nofound.value?.code === 'session_not_found')
+            ok('session_not_found surfaced');
+        else {
+            bad(`expected session_not_found, got: ${JSON.stringify(nofound)}`);
+            failures++;
+        }
 
         info('lldb_stop');
-        const stopped = parseToolResult(await request('tools/call', {
-            name: 'lldb_stop',
-            arguments: { session_id: sid },
-        }, 5000));
+        const stopped = parseToolResult(
+            await request(
+                'tools/call',
+                {
+                    name: 'lldb_stop',
+                    arguments: { session_id: sid },
+                },
+                5000,
+            ),
+        );
         if (!stopped.isError && stopped.value?.ok === true) ok('lldb_stop OK');
-        else { bad(`lldb_stop unexpected: ${JSON.stringify(stopped)}`); failures++; }
+        else {
+            bad(`lldb_stop unexpected: ${JSON.stringify(stopped)}`);
+            failures++;
+        }
 
         info('lldb_stop twice -> session_not_found');
-        const stopAgain = parseToolResult(await request('tools/call', {
-            name: 'lldb_stop',
-            arguments: { session_id: sid },
-        }));
-        if (stopAgain.isError && stopAgain.value?.code === 'session_not_found') ok('double-stop surfaced session_not_found');
-        else { bad(`expected session_not_found on double-stop, got: ${JSON.stringify(stopAgain)}`); failures++; }
+        const stopAgain = parseToolResult(
+            await request('tools/call', {
+                name: 'lldb_stop',
+                arguments: { session_id: sid },
+            }),
+        );
+        if (stopAgain.isError && stopAgain.value?.code === 'session_not_found')
+            ok('double-stop surfaced session_not_found');
+        else {
+            bad(`expected session_not_found on double-stop, got: ${JSON.stringify(stopAgain)}`);
+            failures++;
+        }
 
         // --- Restart scenarios ---
         //
@@ -233,10 +329,16 @@ async function main() {
         // with session_not_found.
 
         info('lldb_start (for restart test)');
-        const preRestart = parseToolResult(await request('tools/call', {
-            name: 'lldb_start',
-            arguments: { binary: '/bin/ls' },
-        }, 15000));
+        const preRestart = parseToolResult(
+            await request(
+                'tools/call',
+                {
+                    name: 'lldb_start',
+                    arguments: { binary: '/bin/ls' },
+                },
+                15000,
+            ),
+        );
         const sidA = preRestart.value?.session_id;
         if (typeof sidA !== 'number') {
             bad(`restart setup failed: ${JSON.stringify(preRestart)}`);
@@ -245,20 +347,28 @@ async function main() {
             ok(`restart setup -> session_id=${sidA}`);
 
             info('lldb_restart with new preload -> fresh session_id');
-            const restarted = parseToolResult(await request('tools/call', {
-                name: 'lldb_restart',
-                arguments: {
-                    session_id: sidA,
-                    preload: ['breakpoint set --name main'],
-                },
-            }, 15000));
+            const restarted = parseToolResult(
+                await request(
+                    'tools/call',
+                    {
+                        name: 'lldb_restart',
+                        arguments: {
+                            session_id: sidA,
+                            preload: ['breakpoint set --name main'],
+                        },
+                    },
+                    15000,
+                ),
+            );
             const sidB = restarted.value?.session_id;
-            if (!restarted.isError &&
+            if (
+                !restarted.isError &&
                 typeof sidB === 'number' &&
                 sidB !== sidA &&
                 restarted.value?.previous_session_id === sidA &&
                 restarted.value?.binary === '/bin/ls' &&
-                restarted.value?.preload_count === 1) {
+                restarted.value?.preload_count === 1
+            ) {
                 ok(`lldb_restart -> session_id=${sidB}, previous_session_id=${sidA}`);
             } else {
                 bad(`lldb_restart unexpected: ${JSON.stringify(restarted)}`);
@@ -267,10 +377,12 @@ async function main() {
 
             if (typeof sidB === 'number') {
                 info('lldb_command on old session_id -> session_not_found');
-                const onOld = parseToolResult(await request('tools/call', {
-                    name: 'lldb_command',
-                    arguments: { session_id: sidA, command: 'version' },
-                }));
+                const onOld = parseToolResult(
+                    await request('tools/call', {
+                        name: 'lldb_command',
+                        arguments: { session_id: sidA, command: 'version' },
+                    }),
+                );
                 if (onOld.isError && onOld.value?.code === 'session_not_found') {
                     ok('old session_id rejected after restart');
                 } else {
@@ -279,13 +391,17 @@ async function main() {
                 }
 
                 info('lldb_command on new session: breakpoint list reflects new preload');
-                const bpList = parseToolResult(await request('tools/call', {
-                    name: 'lldb_command',
-                    arguments: { session_id: sidB, command: 'breakpoint list' },
-                }));
-                if (!bpList.isError &&
+                const bpList = parseToolResult(
+                    await request('tools/call', {
+                        name: 'lldb_command',
+                        arguments: { session_id: sidB, command: 'breakpoint list' },
+                    }),
+                );
+                if (
+                    !bpList.isError &&
                     typeof bpList.value?.output === 'string' &&
-                    /main/i.test(bpList.value.output)) {
+                    /main/i.test(bpList.value.output)
+                ) {
                     ok('new session carries restart-provided breakpoint');
                 } else {
                     bad(`breakpoint list unexpected: ${JSON.stringify(bpList)}`);
@@ -293,15 +409,23 @@ async function main() {
                 }
 
                 info('lldb_restart with no preload reuses previous preload');
-                const restarted2 = parseToolResult(await request('tools/call', {
-                    name: 'lldb_restart',
-                    arguments: { session_id: sidB },
-                }, 15000));
+                const restarted2 = parseToolResult(
+                    await request(
+                        'tools/call',
+                        {
+                            name: 'lldb_restart',
+                            arguments: { session_id: sidB },
+                        },
+                        15000,
+                    ),
+                );
                 const sidC = restarted2.value?.session_id;
-                if (!restarted2.isError &&
+                if (
+                    !restarted2.isError &&
                     typeof sidC === 'number' &&
                     sidC !== sidB &&
-                    restarted2.value?.preload_count === 1) {
+                    restarted2.value?.preload_count === 1
+                ) {
                     ok(`lldb_restart (no preload arg) reuses previous -> session_id=${sidC}`);
                 } else {
                     bad(`lldb_restart (reuse) unexpected: ${JSON.stringify(restarted2)}`);
@@ -310,20 +434,32 @@ async function main() {
 
                 if (typeof sidC === 'number') {
                     info(`lldb_stop restart-chain session ${sidC}`);
-                    const stopC = parseToolResult(await request('tools/call', {
-                        name: 'lldb_stop',
-                        arguments: { session_id: sidC },
-                    }, 5000));
-                    if (!stopC.isError && stopC.value?.ok === true) ok('lldb_stop (restart chain) OK');
-                    else { bad(`lldb_stop (restart chain) unexpected: ${JSON.stringify(stopC)}`); failures++; }
+                    const stopC = parseToolResult(
+                        await request(
+                            'tools/call',
+                            {
+                                name: 'lldb_stop',
+                                arguments: { session_id: sidC },
+                            },
+                            5000,
+                        ),
+                    );
+                    if (!stopC.isError && stopC.value?.ok === true)
+                        ok('lldb_stop (restart chain) OK');
+                    else {
+                        bad(`lldb_stop (restart chain) unexpected: ${JSON.stringify(stopC)}`);
+                        failures++;
+                    }
                 }
             }
 
             info('lldb_restart on already-stopped session -> session_not_found');
-            const restartDead = parseToolResult(await request('tools/call', {
-                name: 'lldb_restart',
-                arguments: { session_id: sidA },
-            }));
+            const restartDead = parseToolResult(
+                await request('tools/call', {
+                    name: 'lldb_restart',
+                    arguments: { session_id: sidA },
+                }),
+            );
             if (restartDead.isError && restartDead.value?.code === 'session_not_found') {
                 ok('restart of gone session surfaced session_not_found');
             } else {
@@ -357,13 +493,19 @@ async function main() {
 
         if (fixture) {
             info('lldb_start with slow preload + default timeout -> socket_never_appeared');
-            const tooSlow = parseToolResult(await request('tools/call', {
-                name: 'lldb_start',
-                arguments: {
-                    binary: fixture.binary,
-                    preload: ['run'],
-                },
-            }, 15000));
+            const tooSlow = parseToolResult(
+                await request(
+                    'tools/call',
+                    {
+                        name: 'lldb_start',
+                        arguments: {
+                            binary: fixture.binary,
+                            preload: ['run'],
+                        },
+                    },
+                    15000,
+                ),
+            );
             if (tooSlow.isError && tooSlow.value?.code === 'socket_never_appeared') {
                 ok('socket_never_appeared fires under default timeout');
             } else {
@@ -372,14 +514,20 @@ async function main() {
             }
 
             info('lldb_start with slow preload + raised socket_wait_ms -> session_id');
-            const okSlow = parseToolResult(await request('tools/call', {
-                name: 'lldb_start',
-                arguments: {
-                    binary: fixture.binary,
-                    preload: ['run'],
-                    socket_wait_ms: 15000,
-                },
-            }, 25000));
+            const okSlow = parseToolResult(
+                await request(
+                    'tools/call',
+                    {
+                        name: 'lldb_start',
+                        arguments: {
+                            binary: fixture.binary,
+                            preload: ['run'],
+                            socket_wait_ms: 15000,
+                        },
+                    },
+                    25000,
+                ),
+            );
             const slowSid = okSlow.value?.session_id;
             if (!okSlow.isError && typeof slowSid === 'number') {
                 ok(`slow preload succeeded -> session_id=${slowSid}`);
@@ -390,10 +538,16 @@ async function main() {
 
             if (typeof slowSid === 'number') {
                 info(`lldb_stop slow session ${slowSid}`);
-                const stopSlow = parseToolResult(await request('tools/call', {
-                    name: 'lldb_stop',
-                    arguments: { session_id: slowSid },
-                }, 5000));
+                const stopSlow = parseToolResult(
+                    await request(
+                        'tools/call',
+                        {
+                            name: 'lldb_stop',
+                            arguments: { session_id: slowSid },
+                        },
+                        5000,
+                    ),
+                );
                 if (!stopSlow.isError && stopSlow.value?.ok === true) {
                     ok('lldb_stop (slow session) OK');
                 } else {
@@ -404,28 +558,38 @@ async function main() {
 
             await fixture.cleanup().catch(() => {});
         }
-
     } finally {
         // Close stdin to trigger orchestrator cleanup path.
         child.stdin.end();
         await new Promise((resolve) => {
             const t = setTimeout(() => {
-                try { child.kill('SIGKILL'); } catch {}
+                try {
+                    child.kill('SIGKILL');
+                } catch {}
                 resolve();
             }, 3000);
-            child.once('exit', () => { clearTimeout(t); resolve(); });
+            child.once('exit', () => {
+                clearTimeout(t);
+                resolve();
+            });
         });
     }
 
     // Post-conditions
-    await new Promise(r => setTimeout(r, 300));
+    await new Promise((r) => setTimeout(r, 300));
     const leftover = await listSocketFiles();
     if (leftover.length === 0) ok('no leftover /tmp/rust-lldb-mcp.* sockets');
-    else { bad(`leftover sockets: ${leftover.join(', ')}`); failures++; }
+    else {
+        bad(`leftover sockets: ${leftover.join(', ')}`);
+        failures++;
+    }
 
     const procs = await countLldbProcs();
     if (procs === 0) ok('no orphan rust-lldb processes');
-    else { bad(`${procs} orphan lldb-related process(es) still running`); failures++; }
+    else {
+        bad(`${procs} orphan lldb-related process(es) still running`);
+        failures++;
+    }
 
     if (failures === 0) {
         console.log(color('32', '\nSmoke test: all checks passed.'));
