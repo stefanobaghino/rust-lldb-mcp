@@ -12,7 +12,7 @@ LLDB with MCP support (`protocol-server start MCP` accepted, `accept:///` Unix-s
 One-command check on your machine:
 
 ```bash
-lldb -b -o "protocol-server start MCP accept:///tmp/lldb-probe.sock" -o "protocol-server stop"
+rust-lldb -b -o "protocol-server start MCP accept:///tmp/lldb-probe.sock" -o "protocol-server stop MCP"
 ```
 
 If the output contains `MCP server started …`, you're fine — skip to the orchestrator section at the bottom. If you see `error: 'protocol-server' is not a valid command`, follow the platform section.
