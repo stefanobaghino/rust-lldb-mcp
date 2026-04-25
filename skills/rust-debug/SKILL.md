@@ -12,6 +12,9 @@ description: |
   Do NOT use for intermittent or flow-across-many-sites bugs
   (recommend the `tracing` crate instead) or for trivial "what is
   this value here" interventions where `dbg!()` is appropriate.
+  Rough heuristic: reach for LLDB when you'd set ≤3 breakpoints;
+  prefer `tracing` or `eprintln!` when you'd want output from
+  every iteration of a loop or every call to a hot function.
 allowed-tools: Bash, Read, Grep, Glob, mcp__rust-lldb__lldb_start, mcp__rust-lldb__lldb_command, mcp__rust-lldb__lldb_restart, mcp__rust-lldb__lldb_stop
 ---
 
@@ -44,6 +47,8 @@ Before loading a target, classify the bug:
 - **Recommend `dbg!()` instead** for one-off "what does this value look like here, once" questions where the debugger-session setup has higher cost than a 10-second edit-rebuild cycle.
 - **Recommend `tracing` instead** when the bug spans many call sites, is intermittent, depends on timing or external systems, or when the user already has a tracing setup. Suggest `RUST_LOG=trace` first.
 - **Recommend re-running with `RUST_BACKTRACE=full`** if the user has only shared a panic message with no backtrace. Get the backtrace before reaching for the debugger.
+
+Rough heuristic for the lldb-vs-tracing call: ≤3 breakpoints → LLDB; needing output from every iteration of a loop or every call to a hot function → `tracing` / `eprintln!`.
 
 If the situation is borderline, say which way you're leaning and why in one sentence, then proceed.
 
